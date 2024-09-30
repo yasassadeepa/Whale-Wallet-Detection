@@ -320,6 +320,7 @@ async function monitorTransactions() {
                 );
                 logger.debug(`Transaction details: ${JSON.stringify(tx)}`);
               }
+              await sleep(2000);
             }
             break; // Success, move to next block
           } else {
@@ -352,7 +353,7 @@ async function monitorTransactions() {
       }
       // Wait 5 seconds between each block to avoid rate limiting
       if (i < BLOCKS_PER_SAMPLE - 1) {
-        await sleep(5000);
+        await sleep(10000);
       }
     }
 
