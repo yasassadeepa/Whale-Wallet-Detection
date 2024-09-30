@@ -1,17 +1,60 @@
-// src/services/solanaMonitor.js
-
 const web3 = require("@solana/web3.js");
 const { Wallet, Transaction } = require("../models");
-const { Op } = require("sequelize");
 const logger = require("../utils/logger");
 
 // Configuration
-const WHALE_BALANCE_THRESHOLD = 10000; // in SOL
-const WHALE_TRANSACTION_VOLUME_THRESHOLD = 100000; // in SOL per day
-const WHALE_TRANSACTION_COUNT_THRESHOLD = 50; // transactions per day
-const MIN_TX_AMOUNT_TO_CHECK = 1000; // in SOL
+const WHALE_BALANCE_THRESHOLD = 100; // Reduced from 10000 to 1000 SOL
+const MIN_TX_AMOUNT_TO_CHECK = 10; // Reduced from 1000 to 100 SOL
 const BLOCKS_PER_SAMPLE = 10;
+const COOLDOWN_PERIOD = 60000; // 10 minutes (in milliseconds)
 const MAX_RETRIES = 3;
+const RETRY_DELAY = 500; // 500 ms
+const MIN_DEX_ACTIVITY_FOR_WHALE = 2; // Reduced from 5 to 2
+
+const DEX_PROGRAM_IDS = [
+  "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",
+  "H8W3ctz92svYg6mkn1UtGfu2aQr2fnUFHM1RhScEtQDt",
+  "CTMAxxk34HjKWxQ3QLZK1HpaLXmBveao3ESePXbiyfzh",
+  "opnb2LAfJYbRMAHHvqjCwQxanZn7ReEHp1k81EohpZb",
+  "swapNyd8XiQwJ6ianp9snpu4brUqFxadzvHebnAXjJZ",
+  "DecZY86MU5Gj7kppfUCEmd4LbXXuyZH1yHaP2NTqdiZB",
+  "GFXsSL5sSaDfNFQUYsHekbWBW1TsFdjDYzACh62tEHxn",
+  "Dooar9JkhdZ7J3LHN3A7YCuoGRUggXhQaG4kijfLGU2j",
+  "SwaPpA9LAaLfeLi3a68M4DjnLqgtticKg6CnyNwgAC8",
+  "PSwapMdSai8tjrEXcxFeQth87xC4rRsa4VA5mhGhXkP",
+  "SSwapUtytfBdBn1b9NUGG6foMVPtcWgpRU32HToDUZr",
+  "DEXYosS6oEGvk8uCDayvwEZz4qEyDJRf9nFgYCaqPMTm",
+  "MoonCVVNZFSYkqNXP6bxHLPL6QQJiMagDL3qcqUQTrG",
+  "CLMM9tUoggJu2wagPkkqs9eFG4BWhVBZWkP1qv3Sp7tR",
+  "DjVE6JNiYqPL2QXyCUUh8rNjHrbz9hXHNYt99MQ59qw1",
+  "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+  "FLUXubRmkEi2q6K3Y9kBPg9248ggaZVsoSFhtJHSrm1X",
+  "9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP",
+  "SSwpkEEcbUqx4vtoEByFjSkhKdCT862DNVb52nZg1UZ",
+  "DSwpgjMvXhtGn6BsbqmacdBZyfLj6jSWf3HJpdJtmg6N",
+  "MERLuDFBMmsHnsBPZw2sDQZHvXFMwp8EdjudcU2HKky",
+  "Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB",
+  "HyaB3W9q6XdA5xwpU4XnSZV94htfmbmqJXZcEbRaJutt",
+  "BSwp6bEBihVLdqJRKGgzjcGLHkcTuzmSo1TQkHepzH8p",
+  "2wT8Yq49kHgDzXuPxZSaeLaH1qbmGXtEyPy64bL7aD3c",
+  "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C",
+  "EewxydAPCCVuNEyrVN68PuSYdQ7wKn27V9Gjeoi8dy3S",
+  "treaf4wWBBty3fHdyBpo35Mz84M8k3heKXmjmi9vFt5",
+  "swapFpHZwjELNnjvThjajtiVmkz3yPQEHjLtka2fwHW",
+  "stkitrT1Uoy18Dk1fTrgPw8W6MVzoCfYoAFT4MLsmhq",
+  "9tKE7Mbmj4mxDjWatikzGAtkoWosiiZX9y6J4Hfm2R8H",
+  "Gswppe6ERWKpUTXvRPfXdzHhiCyJvLadVvXGfdpBqcE1",
+  "PhoeNiXZ8ByJGLkxNfZRnkUfjvmuYqLR89jjFHGqdXY",
+  "PERPHjGBqRHArX4DySjwM6UJHiR3sWAatqfdBS2qQJu",
+  "AMM55ShdkoGRB5jVYPjWziwk8m5MpwyDgsMWHaMSQWH6",
+  "obriQD1zbpyLz95G5n7nJe6a4DPjpFwa5XYPoNm113y",
+  "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
+  "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+  "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
+  "srmqPvymJeFKQ4zGQed1GFppgkRHL9kaELCbyksJtPX",
+  "CURVGoZn8zycx6FXwwevgBTB2gVvdbGTEpvMJDbgs2t4",
+  "5ocnV1qiCgaQR8Jb8xWnVbApfaygJ8tNoZfgPwsgx9kx",
+];
 
 // Solana connection
 const connection = new web3.Connection(web3.clusterApiUrl("mainnet-beta"), {
@@ -19,16 +62,13 @@ const connection = new web3.Connection(web3.clusterApiUrl("mainnet-beta"), {
   confirmTransactionInitialTimeout: 60000,
 });
 
-// Utility functions
 async function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Main monitoring function
 async function monitorTransactions() {
-  logger.info("Starting continuous monitoring...");
-
   while (true) {
+    logger.info("Starting a new sampling cycle...");
     let whalesDetectedInCurrentCycle = 0;
 
     for (let i = 0; i < BLOCKS_PER_SAMPLE; i++) {
@@ -51,8 +91,8 @@ async function monitorTransactions() {
               `Processing ${block.transactions.length} transactions in block ${slot}`
             );
             for (const tx of block.transactions) {
-              const newWhales = await processTransaction(tx);
-              whalesDetectedInCurrentCycle += newWhales;
+              const isWhale = await processTransaction(tx);
+              if (isWhale) whalesDetectedInCurrentCycle++;
             }
             break; // Success, move to next block
           } else {
@@ -61,36 +101,44 @@ async function monitorTransactions() {
             );
           }
         } catch (error) {
-          logger.error("Error fetching block:", error.message);
-          retries++;
-          if (retries >= MAX_RETRIES) {
-            logger.warn("Max retries reached. Moving to next block.");
-          } else {
-            logger.info(
-              `Retrying in 10 seconds... (Attempt ${
-                retries + 1
-              }/${MAX_RETRIES})`
+          if (error.message.includes("429 Too Many Requests")) {
+            logger.warn(
+              `Rate limit hit. Retrying after ${RETRY_DELAY}ms delay...`
             );
-            await sleep(10000);
+            await sleep(RETRY_DELAY);
+          } else {
+            logger.error("Error fetching block:", error.message);
+            retries++;
+            if (retries >= MAX_RETRIES) {
+              logger.warn("Max retries reached. Moving to next block.");
+            } else {
+              logger.info(
+                `Retrying in 10 seconds... (Attempt ${
+                  retries + 1
+                }/${MAX_RETRIES})`
+              );
+              await sleep(10000);
+            }
           }
         }
       }
-      // Wait 1 second between each block to avoid rate limiting
+      // Wait 5 seconds between each block to avoid rate limiting
       if (i < BLOCKS_PER_SAMPLE - 1) {
-        await sleep(1000);
+        await sleep(5000);
       }
     }
 
     logger.info(
-      `Cycle complete. Detected ${whalesDetectedInCurrentCycle} new whale wallets in this cycle.`
+      `Sampling cycle complete. Detected ${whalesDetectedInCurrentCycle} new whale wallets in this cycle.`
     );
-    // Immediately start the next cycle
+    logger.info(`Cooling down for ${COOLDOWN_PERIOD / 60000} minutes.`);
+    await sleep(COOLDOWN_PERIOD);
   }
 }
 
-// Process individual transactions
 async function processTransaction(transaction) {
   let whalesDetected = 0;
+  let whaleInvolved = false;
   try {
     if (
       transaction &&
@@ -106,10 +154,9 @@ async function processTransaction(transaction) {
 
       for (let i = 0; i < accounts.length; i++) {
         const address = accounts[i].toString();
-        const balanceInLamports = postBalances[i];
-        const balanceInSOL = balanceInLamports / web3.LAMPORTS_PER_SOL;
-        const balanceChangeInSOL =
-          Math.abs(postBalances[i] - preBalances[i]) / web3.LAMPORTS_PER_SOL;
+        const balanceInSOL = postBalances[i] / web3.LAMPORTS_PER_SOL;
+        const preBalanceInSOL = preBalances[i] / web3.LAMPORTS_PER_SOL;
+        const balanceChangeInSOL = Math.abs(balanceInSOL - preBalanceInSOL);
 
         if (
           balanceInSOL >= MIN_TX_AMOUNT_TO_CHECK ||
@@ -120,85 +167,97 @@ async function processTransaction(transaction) {
             balanceInSOL,
             balanceChangeInSOL
           );
-          if (isWhale) whalesDetected++;
+          if (isWhale) {
+            whalesDetected++;
+            whaleInvolved = true;
+          }
         }
       }
 
-      // Store the transaction
-      await storeTransaction(transaction);
+      // If a whale was involved in this transaction, store it
+      if (whaleInvolved) {
+        await storeTransaction(transaction);
+      }
     }
   } catch (error) {
     logger.error("Error processing transaction:", error);
+    logger.debug(
+      "Problematic transaction:",
+      JSON.stringify(transaction, null, 2)
+    );
   }
   return whalesDetected;
 }
 
-// Update or add whale wallet information
-async function updateWallet(address, balance, transactionAmount) {
+async function updateWallet(address, balance, balanceChange) {
   try {
-    // First, check if this transaction would make the wallet a whale
-    const isWhaleNow = await checkWhaleStatus(
-      address,
-      balance,
-      transactionAmount
+    logger.debug(
+      `Checking wallet: ${address}, Balance: ${balance}, Balance Change: ${balanceChange}`
     );
 
-    if (isWhaleNow) {
-      // If it's a whale, update or insert the wallet
-      const [wallet, created] = await Wallet.findOrCreate({
+    // Check if this wallet would be classified as a whale
+    const isWhale =
+      balance >= WHALE_BALANCE_THRESHOLD ||
+      balanceChange >= WHALE_BALANCE_THRESHOLD;
+
+    if (isWhale) {
+      // Only interact with the database if it's a whale
+      let [wallet, created] = await Wallet.findOrCreate({
         where: { address },
         defaults: {
-          balance: parseFloat(balance.toFixed(8)),
+          balance,
           lastActivity: new Date(),
+          dexActivityCount: 1,
           isWhale: true,
-          activityCount: 1,
-          dailyTransactionVolume: parseFloat(transactionAmount.toFixed(8)),
-          dailyTransactionCount: 1,
+          largestTransaction: balanceChange,
         },
       });
 
       if (!created) {
         // Update existing whale wallet
-        const updatedData = {
-          balance: parseFloat(balance.toFixed(8)),
+        await wallet.update({
+          balance,
           lastActivity: new Date(),
-          activityCount: wallet.activityCount + 1,
-          dailyTransactionVolume: parseFloat(
-            (
-              parseFloat(wallet.dailyTransactionVolume) + transactionAmount
-            ).toFixed(8)
+          dexActivityCount: wallet.dexActivityCount + 1,
+          isWhale: true,
+          largestTransaction: Math.max(
+            wallet.largestTransaction,
+            balanceChange
           ),
-          dailyTransactionCount: wallet.dailyTransactionCount + 1,
-        };
-
-        // Reset daily counters if it's a new day
-        if (isNewDay(wallet.lastActivity)) {
-          updatedData.dailyTransactionVolume = parseFloat(
-            transactionAmount.toFixed(8)
-          );
-          updatedData.dailyTransactionCount = 1;
-        }
-
-        await wallet.update(updatedData);
-      }
-
-      logger.info(
-        `🐳 Whale wallet updated: ${address}, Balance: ${balance.toFixed(
-          8
-        )} SOL`
-      );
-      return true;
-    } else {
-      // If it's not a whale, check if it was previously a whale and remove if necessary
-      const existingWhale = await Wallet.findOne({
-        where: { address, isWhale: true },
-      });
-      if (existingWhale) {
-        await existingWhale.destroy();
+        });
         logger.info(
-          `Wallet no longer classified as whale and removed: ${address}`
+          `🐳 Updated whale wallet: ${address}, Balance: ${balance.toFixed(
+            2
+          )} SOL, DEX Activities: ${
+            wallet.dexActivityCount + 1
+          }, Largest Transaction: ${Math.max(
+            wallet.largestTransaction,
+            balanceChange
+          ).toFixed(2)} SOL`
+        );
+      } else {
+        logger.info(
+          `🐳 New whale wallet identified: ${address}, Balance: ${balance.toFixed(
+            2
+          )} SOL, DEX Activities: 1, Largest Transaction: ${balanceChange.toFixed(
+            2
+          )} SOL`
         );
       }
+
+      return true;
+    } else {
+      // If it's not a whale, check if it was previously in the database and remove if necessary
+      const existingWallet = await Wallet.findOne({ where: { address } });
+      if (existingWallet) {
+        await existingWallet.destroy();
+        logger.info(
+          `Wallet no longer classified as whale and removed: ${address}, Balance: ${balance.toFixed(
+            2
+          )} SOL`
+        );
+      }
+      return false;
     }
   } catch (error) {
     logger.error("Error updating wallet:", error);
@@ -207,215 +266,50 @@ async function updateWallet(address, balance, transactionAmount) {
       JSON.stringify({
         address,
         balance,
-        transactionAmount,
+        balanceChange,
         error: error.message,
       })
     );
+    return false;
   }
-  return false;
 }
 
-async function checkWhaleStatus(
-  address,
-  currentBalance,
-  currentTransactionAmount
-) {
-  // Check balance criterion
-  if (currentBalance >= WHALE_BALANCE_THRESHOLD) return true;
-
-  // Check transaction volume criterion
-  const dailyTransactions = await Transaction.sum("amount", {
-    where: {
-      [Op.or]: [{ fromWallet: address }, { toWallet: address }],
-      timestamp: { [Op.gte]: new Date(Date.now() - 24 * 60 * 60 * 1000) },
-    },
-  });
-
-  const dailyVolume = (dailyTransactions || 0) + currentTransactionAmount;
-  if (dailyVolume >= WHALE_TRANSACTION_VOLUME_THRESHOLD) return true;
-
-  // Check transaction count criterion
-  const dailyCount = await Transaction.count({
-    where: {
-      [Op.or]: [{ fromWallet: address }, { toWallet: address }],
-      timestamp: { [Op.gte]: new Date(Date.now() - 24 * 60 * 60 * 1000) },
-    },
-  });
-
-  if (dailyCount + 1 >= WHALE_TRANSACTION_COUNT_THRESHOLD) return true;
-
-  // Check long-term activity (if applicable)
-  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-  const oldTransactions = await Transaction.findOne({
-    where: {
-      [Op.or]: [{ fromWallet: address }, { toWallet: address }],
-      timestamp: { [Op.lt]: thirtyDaysAgo },
-    },
-  });
-  if (oldTransactions && currentBalance >= WHALE_BALANCE_THRESHOLD / 2)
-    return true;
-
-  return false;
-}
-
-function isNewDay(lastActivity) {
-  const now = new Date();
-  return (
-    lastActivity.getDate() !== now.getDate() ||
-    lastActivity.getMonth() !== now.getMonth() ||
-    lastActivity.getFullYear() !== now.getFullYear()
-  );
-}
-
-async function storeTransaction(txInfo, retries = 3) {
+async function storeTransaction(txInfo) {
   try {
-    logger.debug("Raw txInfo:", JSON.stringify(txInfo, null, 2));
-
-    if (
-      !txInfo.transaction ||
-      !txInfo.transaction.message ||
-      !txInfo.transaction.message.accountKeys
-    ) {
-      logger.error("Invalid txInfo structure");
-      return;
-    }
-
+    const signature = txInfo.transaction.signatures[0];
     const fromWallet = txInfo.transaction.message.accountKeys[0].toString();
     const toWallet = txInfo.transaction.message.accountKeys[1].toString();
+    const amount =
+      (txInfo.meta.postBalances[1] - txInfo.meta.preBalances[1]) /
+      web3.LAMPORTS_PER_SOL;
+    const timestamp = txInfo.blockTime
+      ? new Date(txInfo.blockTime * 1000)
+      : new Date(); // Fallback to current date
 
-    logger.debug("From wallet:", fromWallet);
-    logger.debug("To wallet:", toWallet);
-
-    // Check if either the sender or receiver is a whale
-    const [senderWallet, receiverWallet] = await Promise.all([
-      Wallet.findOne({ where: { address: fromWallet, isWhale: true } }),
-      Wallet.findOne({ where: { address: toWallet, isWhale: true } }),
-    ]);
-
-    if (senderWallet || receiverWallet) {
-      if (
-        !txInfo.meta ||
-        !txInfo.meta.postBalances ||
-        !txInfo.meta.preBalances
-      ) {
-        logger.error("Invalid txInfo.meta structure");
-        return;
-      }
-
-      const amount =
-        (txInfo.meta.postBalances[1] - txInfo.meta.preBalances[1]) /
-        web3.LAMPORTS_PER_SOL;
-
-      const transactionData = {
-        signature: txInfo.transaction.signatures[0],
-        fromWallet: fromWallet,
-        toWallet: toWallet,
-        amount: parseFloat(amount.toFixed(8)),
-        timestamp: txInfo.blockTime
-          ? new Date(txInfo.blockTime * 1000)
-          : new Date(),
-        involvesWhale: true,
-      };
-
-      logger.info(
-        "Constructed transactionData:",
-        JSON.stringify(transactionData, null, 2)
-      );
-
-      const createdTransaction = await Transaction.create(transactionData);
-
-      logger.info(`Stored whale transaction: ${createdTransaction.signature}`);
-    } else {
-      logger.debug(
-        "Transaction not involving a whale wallet, skipping storage"
-      );
-    }
-  } catch (error) {
-    const errorDetails = {
-      message: error.message,
-      stack: error.stack,
-      name: error.name,
-      code: error.code,
-      sqlMessage: error.sqlMessage,
-      sql: error.sql,
-      parameters: error.parameters,
+    const transactionData = {
+      signature,
+      fromWallet,
+      toWallet,
+      amount: Math.abs(amount), // Ensure amount is positive
+      timestamp,
     };
 
-    if (error.original) {
-      errorDetails.original = {
-        code: error.original.code,
-        detail: error.original.detail,
-        where: error.original.where,
-        file: error.original.file,
-        line: error.original.line,
-        routine: error.original.routine,
-      };
-    }
+    logger.debug("Storing transaction:", JSON.stringify(transactionData));
 
-    if (retries > 0) {
-      logger.warn(
-        `Error storing transaction, retrying... (${retries} attempts left)`
-      );
-      logger.error("Error details:", JSON.stringify(errorDetails, null, 2));
-      await new Promise((resolve) => setTimeout(resolve, 1000)); // Wait for 1 second before retrying
-      return storeTransaction(txInfo, retries - 1);
+    const [transaction, created] = await Transaction.findOrCreate({
+      where: { signature },
+      defaults: transactionData,
+    });
+
+    if (created) {
+      logger.info(`Stored whale transaction: ${signature}`);
+    } else {
+      logger.debug(`Transaction ${signature} already exists in the database`);
     }
-    logger.error(
-      "Error storing transaction:",
-      JSON.stringify(errorDetails, null, 2)
-    );
+  } catch (error) {
+    logger.error("Error storing transaction:", error);
     logger.error("Transaction info:", JSON.stringify(txInfo, null, 2));
   }
 }
 
-// Reporting functions
-async function logStats() {
-  const totalWallets = await Wallet.count();
-  const whaleWallets = await Wallet.count({ where: { isWhale: true } });
-  logger.info("--- Current Stats ---");
-  logger.info(`Total wallets tracked: ${totalWallets}`);
-  logger.info(`Total whale wallets: ${whaleWallets}`);
-  logger.info("---------------------");
-}
-
-async function generateDetailedReport() {
-  logger.info("=== Detailed Whale Wallet Report ===");
-  const whales = await Wallet.findAll({ where: { isWhale: true } });
-  for (const whale of whales) {
-    const riskScore = calculateRiskScore(whale);
-    logger.info(`Address: ${whale.address}`);
-    logger.info(`  Balance: ${whale.balance.toFixed(2)} SOL`);
-    logger.info(`  Last Seen: ${whale.lastActivity.toISOString()}`);
-    logger.info(`  Activity Count: ${whale.activityCount}`);
-    logger.info(
-      `  Daily Transaction Volume: ${whale.dailyTransactionVolume.toFixed(
-        2
-      )} SOL`
-    );
-    logger.info(`  Daily Transaction Count: ${whale.dailyTransactionCount}`);
-    logger.info(`  Risk Score: ${riskScore.toFixed(2)}`);
-    logger.info("---");
-  }
-}
-
-function calculateRiskScore(wallet) {
-  const balanceScore = Math.min(
-    wallet.balance / (WHALE_BALANCE_THRESHOLD * 2),
-    1
-  );
-  const volumeScore = Math.min(
-    wallet.dailyTransactionVolume / WHALE_TRANSACTION_VOLUME_THRESHOLD,
-    1
-  );
-  const countScore = Math.min(
-    wallet.dailyTransactionCount / WHALE_TRANSACTION_COUNT_THRESHOLD,
-    1
-  );
-  return (balanceScore * 0.4 + volumeScore * 0.4 + countScore * 0.2) * 100; // Weighted average, scaled to 0-100
-}
-
-module.exports = {
-  monitorTransactions,
-  logStats,
-  generateDetailedReport,
-};
+module.exports = { monitorTransactions };
