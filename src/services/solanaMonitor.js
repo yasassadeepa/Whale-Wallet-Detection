@@ -3,13 +3,13 @@ const { Wallet, Transaction } = require("../models");
 const logger = require("../utils/logger");
 
 // Configuration
-const WHALE_BALANCE_THRESHOLD = 100; // Reduced from 10000 to 1000 SOL
-const MIN_TX_AMOUNT_TO_CHECK = 10; // Reduced from 1000 to 100 SOL
+const DEX_WHALE_BALANCE_THRESHOLD = 10000; // in SOL
+const DEX_WHALE_TRANSACTION_THRESHOLD = 1000; // in SOL
+const MIN_BALANCE_TO_TRACK = 10; // in SOL, adjust as needed
 const BLOCKS_PER_SAMPLE = 10;
 const COOLDOWN_PERIOD = 60000; // 10 minutes (in milliseconds)
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 500; // 500 ms
-const MIN_DEX_ACTIVITY_FOR_WHALE = 2; // Reduced from 5 to 2
 
 const DEX_PROGRAM_IDS = [
   "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",
@@ -66,6 +66,226 @@ async function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function isDEXTransaction(transaction) {
+  if (
+    transaction &&
+    transaction.transaction &&
+    transaction.transaction.message &&
+    transaction.transaction.message.accountKeys
+  ) {
+    const programIds = transaction.transaction.message.accountKeys.map((key) =>
+      key.toString()
+    );
+    return programIds.some((id) => DEX_PROGRAM_IDS.includes(id));
+  }
+  return false;
+}
+
+const STAKE_PROGRAM_ID = new web3.PublicKey(
+  "Stake11111111111111111111111111111111111111"
+);
+
+async function isStakingAccount(address) {
+  try {
+    const pubkey = new web3.PublicKey(address);
+    const accountInfo = await connection.getAccountInfo(pubkey);
+
+    if (!accountInfo) {
+      return false;
+    }
+
+    return accountInfo.owner.equals(STAKE_PROGRAM_ID);
+  } catch (error) {
+    console.error(`Error checking if ${address} is a staking account:`, error);
+    return false;
+  }
+}
+
+// Helper function to determine if an account meets DEX whale criteria
+function isDEXWhale(balance, transactionAmount) {
+  return (
+    (balance >= DEX_WHALE_BALANCE_THRESHOLD ||
+      transactionAmount >= DEX_WHALE_TRANSACTION_THRESHOLD) &&
+    balance >= MIN_BALANCE_TO_TRACK
+  ); // Add this if you want to ignore very small accounts
+}
+
+async function updateWallet(
+  address,
+  balance,
+  balanceChange,
+  transactionAmount
+) {
+  try {
+    // Only proceed if it's a DEX whale
+    if (isDEXWhale(balance, transactionAmount)) {
+      let [wallet, created] = await Wallet.findOrCreate({
+        where: { address },
+        defaults: {
+          balance,
+          lastActivity: new Date(),
+          dexTransactionCount: 1,
+          largestDEXTransaction: transactionAmount,
+        },
+      });
+
+      if (!created) {
+        await wallet.update({
+          balance,
+          lastActivity: new Date(),
+          dexTransactionCount: wallet.dexTransactionCount + 1,
+          largestDEXTransaction: Math.max(
+            Number(wallet.largestDEXTransaction),
+            transactionAmount
+          ),
+        });
+      }
+
+      // Ensure we're working with numbers for the log message
+      const logLargestTransaction = Number(
+        created ? transactionAmount : wallet.largestDEXTransaction
+      );
+
+      logger.info(
+        `${
+          created ? "New" : "Updated"
+        } DEX whale wallet: ${address}, Balance: ${balance.toFixed(
+          2
+        )} SOL, DEX Transactions: ${
+          wallet.dexTransactionCount
+        }, Largest Transaction: ${logLargestTransaction.toFixed(2)} SOL`
+      );
+
+      return wallet;
+    }
+    return null; // Return null if it's not a DEX whale
+  } catch (error) {
+    logger.error("Error updating wallet:", error);
+    return null;
+  }
+}
+
+function calculateTransactionAmount(transaction) {
+  let totalChange = 0;
+  const preBalances = transaction.meta.preBalances;
+  const postBalances = transaction.meta.postBalances;
+
+  for (let i = 0; i < preBalances.length; i++) {
+    const change = postBalances[i] - preBalances[i];
+    totalChange += Math.abs(change);
+  }
+
+  return totalChange / web3.LAMPORTS_PER_SOL;
+}
+
+async function processTransaction(transaction) {
+  if (!isDEXTransaction(transaction)) return false;
+
+  let dexWhaleInvolved = false;
+  let whaleAddresses = [];
+
+  if (
+    transaction &&
+    transaction.transaction &&
+    transaction.transaction.message &&
+    transaction.transaction.message.accountKeys &&
+    transaction.meta &&
+    transaction.meta.postBalances &&
+    transaction.meta.preBalances
+  ) {
+    const accounts = transaction.transaction.message.accountKeys;
+    const postBalances = transaction.meta.postBalances;
+    const preBalances = transaction.meta.preBalances;
+
+    const amount = calculateTransactionAmount(transaction);
+
+    for (let i = 0; i < accounts.length; i++) {
+      const address = accounts[i].toString();
+      const balanceInSOL = postBalances[i] / web3.LAMPORTS_PER_SOL;
+      const balanceChangeInSOL = Math.abs(
+        balanceInSOL - preBalances[i] / web3.LAMPORTS_PER_SOL
+      );
+
+      try {
+        // Check if the account meets DEX whale criteria
+        if (isDEXWhale(balanceInSOL, amount)) {
+          // Only proceed if it's not a staking account
+          if (!(await isStakingAccount(address))) {
+            const wallet = await updateWallet(
+              address,
+              balanceInSOL,
+              balanceChangeInSOL,
+              amount
+            );
+            if (wallet) {
+              dexWhaleInvolved = true;
+              whaleAddresses.push(address);
+            }
+          }
+        }
+      } catch (error) {
+        logger.error(`Error processing account ${address}: ${error.message}`);
+      }
+    }
+  }
+
+  if (dexWhaleInvolved) {
+    await storeTransaction(transaction, whaleAddresses);
+  }
+
+  return dexWhaleInvolved;
+}
+
+async function storeTransaction(txInfo, whaleAddresses) {
+  try {
+    const signature = txInfo.transaction.signatures[0];
+    const fromWallet = txInfo.transaction.message.accountKeys[0].toString();
+    const toWallet = txInfo.transaction.message.accountKeys[1].toString();
+    const amount = calculateTransactionAmount(txInfo);
+    const timestamp = txInfo.blockTime
+      ? new Date(txInfo.blockTime * 1000)
+      : new Date();
+
+    // Only store if either the from or to wallet is a whale
+    if (
+      whaleAddresses.includes(fromWallet) ||
+      whaleAddresses.includes(toWallet)
+    ) {
+      const transactionData = {
+        signature,
+        fromWallet,
+        toWallet,
+        amount,
+        timestamp,
+        involvedWhales: whaleAddresses.join(","), // Store involved whale addresses
+      };
+
+      logger.debug(
+        "Storing DEX whale transaction:",
+        JSON.stringify(transactionData)
+      );
+
+      const [transaction, created] = await Transaction.findOrCreate({
+        where: { signature },
+        defaults: transactionData,
+      });
+
+      if (created) {
+        logger.info(`Stored DEX whale transaction: ${signature}`);
+      } else {
+        logger.debug(`Transaction ${signature} already exists in the database`);
+      }
+    } else {
+      logger.debug(
+        `Transaction ${signature} does not involve a whale wallet, not storing`
+      );
+    }
+  } catch (error) {
+    logger.error("Error storing transaction:", error);
+    logger.error("Transaction info:", JSON.stringify(txInfo, null, 2));
+  }
+}
+
 async function monitorTransactions() {
   while (true) {
     logger.info("Starting a new sampling cycle...");
@@ -91,8 +311,15 @@ async function monitorTransactions() {
               `Processing ${block.transactions.length} transactions in block ${slot}`
             );
             for (const tx of block.transactions) {
-              const isWhale = await processTransaction(tx);
-              if (isWhale) whalesDetectedInCurrentCycle++;
+              try {
+                const isWhale = await processTransaction(tx);
+                if (isWhale) whalesDetectedInCurrentCycle++;
+              } catch (txError) {
+                logger.error(
+                  `Error processing transaction: ${txError.message}`
+                );
+                logger.debug(`Transaction details: ${JSON.stringify(tx)}`);
+              }
             }
             break; // Success, move to next block
           } else {
@@ -107,7 +334,8 @@ async function monitorTransactions() {
             );
             await sleep(RETRY_DELAY);
           } else {
-            logger.error("Error fetching block:", error.message);
+            logger.error(`Error fetching block: ${error.message}`);
+            logger.debug(`Error stack: ${error.stack}`);
             retries++;
             if (retries >= MAX_RETRIES) {
               logger.warn("Max retries reached. Moving to next block.");
@@ -129,186 +357,10 @@ async function monitorTransactions() {
     }
 
     logger.info(
-      `Sampling cycle complete. Detected ${whalesDetectedInCurrentCycle} new whale wallets in this cycle.`
+      `Sampling cycle complete. Detected ${whalesDetectedInCurrentCycle} new DEX whale wallets in this cycle.`
     );
     logger.info(`Cooling down for ${COOLDOWN_PERIOD / 60000} minutes.`);
     await sleep(COOLDOWN_PERIOD);
-  }
-}
-
-async function processTransaction(transaction) {
-  let whalesDetected = 0;
-  let whaleInvolved = false;
-  try {
-    if (
-      transaction &&
-      transaction.meta &&
-      transaction.meta.postBalances &&
-      transaction.transaction &&
-      transaction.transaction.message &&
-      transaction.transaction.message.accountKeys
-    ) {
-      const accounts = transaction.transaction.message.accountKeys;
-      const postBalances = transaction.meta.postBalances;
-      const preBalances = transaction.meta.preBalances;
-
-      for (let i = 0; i < accounts.length; i++) {
-        const address = accounts[i].toString();
-        const balanceInSOL = postBalances[i] / web3.LAMPORTS_PER_SOL;
-        const preBalanceInSOL = preBalances[i] / web3.LAMPORTS_PER_SOL;
-        const balanceChangeInSOL = Math.abs(balanceInSOL - preBalanceInSOL);
-
-        if (
-          balanceInSOL >= MIN_TX_AMOUNT_TO_CHECK ||
-          balanceChangeInSOL >= MIN_TX_AMOUNT_TO_CHECK
-        ) {
-          const isWhale = await updateWallet(
-            address,
-            balanceInSOL,
-            balanceChangeInSOL
-          );
-          if (isWhale) {
-            whalesDetected++;
-            whaleInvolved = true;
-          }
-        }
-      }
-
-      // If a whale was involved in this transaction, store it
-      if (whaleInvolved) {
-        await storeTransaction(transaction);
-      }
-    }
-  } catch (error) {
-    logger.error("Error processing transaction:", error);
-    logger.debug(
-      "Problematic transaction:",
-      JSON.stringify(transaction, null, 2)
-    );
-  }
-  return whalesDetected;
-}
-
-async function updateWallet(address, balance, balanceChange) {
-  try {
-    logger.debug(
-      `Checking wallet: ${address}, Balance: ${balance}, Balance Change: ${balanceChange}`
-    );
-
-    // Check if this wallet would be classified as a whale
-    const isWhale =
-      balance >= WHALE_BALANCE_THRESHOLD ||
-      balanceChange >= WHALE_BALANCE_THRESHOLD;
-
-    if (isWhale) {
-      // Only interact with the database if it's a whale
-      let [wallet, created] = await Wallet.findOrCreate({
-        where: { address },
-        defaults: {
-          balance,
-          lastActivity: new Date(),
-          dexActivityCount: 1,
-          isWhale: true,
-          largestTransaction: balanceChange,
-        },
-      });
-
-      if (!created) {
-        // Update existing whale wallet
-        await wallet.update({
-          balance,
-          lastActivity: new Date(),
-          dexActivityCount: wallet.dexActivityCount + 1,
-          isWhale: true,
-          largestTransaction: Math.max(
-            wallet.largestTransaction,
-            balanceChange
-          ),
-        });
-        logger.info(
-          `🐳 Updated whale wallet: ${address}, Balance: ${balance.toFixed(
-            2
-          )} SOL, DEX Activities: ${
-            wallet.dexActivityCount + 1
-          }, Largest Transaction: ${Math.max(
-            wallet.largestTransaction,
-            balanceChange
-          ).toFixed(2)} SOL`
-        );
-      } else {
-        logger.info(
-          `🐳 New whale wallet identified: ${address}, Balance: ${balance.toFixed(
-            2
-          )} SOL, DEX Activities: 1, Largest Transaction: ${balanceChange.toFixed(
-            2
-          )} SOL`
-        );
-      }
-
-      return true;
-    } else {
-      // If it's not a whale, check if it was previously in the database and remove if necessary
-      const existingWallet = await Wallet.findOne({ where: { address } });
-      if (existingWallet) {
-        await existingWallet.destroy();
-        logger.info(
-          `Wallet no longer classified as whale and removed: ${address}, Balance: ${balance.toFixed(
-            2
-          )} SOL`
-        );
-      }
-      return false;
-    }
-  } catch (error) {
-    logger.error("Error updating wallet:", error);
-    logger.error(
-      "Error details:",
-      JSON.stringify({
-        address,
-        balance,
-        balanceChange,
-        error: error.message,
-      })
-    );
-    return false;
-  }
-}
-
-async function storeTransaction(txInfo) {
-  try {
-    const signature = txInfo.transaction.signatures[0];
-    const fromWallet = txInfo.transaction.message.accountKeys[0].toString();
-    const toWallet = txInfo.transaction.message.accountKeys[1].toString();
-    const amount =
-      (txInfo.meta.postBalances[1] - txInfo.meta.preBalances[1]) /
-      web3.LAMPORTS_PER_SOL;
-    const timestamp = txInfo.blockTime
-      ? new Date(txInfo.blockTime * 1000)
-      : new Date(); // Fallback to current date
-
-    const transactionData = {
-      signature,
-      fromWallet,
-      toWallet,
-      amount: Math.abs(amount), // Ensure amount is positive
-      timestamp,
-    };
-
-    logger.debug("Storing transaction:", JSON.stringify(transactionData));
-
-    const [transaction, created] = await Transaction.findOrCreate({
-      where: { signature },
-      defaults: transactionData,
-    });
-
-    if (created) {
-      logger.info(`Stored whale transaction: ${signature}`);
-    } else {
-      logger.debug(`Transaction ${signature} already exists in the database`);
-    }
-  } catch (error) {
-    logger.error("Error storing transaction:", error);
-    logger.error("Transaction info:", JSON.stringify(txInfo, null, 2));
   }
 }
 

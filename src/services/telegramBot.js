@@ -3,10 +3,14 @@ const { Wallet, Transaction } = require("../models");
 const { Op } = require("sequelize");
 const logger = require("../utils/logger");
 
+// Configuration constants
+const DEX_WHALE_BALANCE_THRESHOLD = 1000; // in SOL
+const DEX_WHALE_TRANSACTION_THRESHOLD = 100; // in SOL
+const MIN_BALANCE_TO_TRACK = 10; // in SOL
+
 let bot;
 
 function startBot() {
-  // Replace 'YOUR_TELEGRAM_BOT_TOKEN' with your actual bot token
   bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
 
   // Start command
@@ -14,7 +18,7 @@ function startBot() {
     const chatId = msg.chat.id;
     bot.sendMessage(
       chatId,
-      "Welcome to the DEX Whale Wallet Detector Bot! Use /help to see available commands."
+      "Welcome to the Solana DEX Whale Detector Bot! Use /help to see available commands."
     );
   });
 
@@ -26,10 +30,11 @@ Available commands:
 /start - Start the bot
 /help - Show this help message
 /dexwhales - List top DEX whale wallets
-/stats - Show general statistics
+/stats - Show general DEX whale statistics
 /recentactivity - Show recent DEX whale activity
-/search <address> - Search for a specific wallet
-  `;
+/search <address> - Search for a specific DEX whale wallet
+/criteria - Show current DEX whale criteria
+    `;
     bot.sendMessage(chatId, helpMessage);
   });
 
@@ -38,10 +43,6 @@ Available commands:
     const chatId = msg.chat.id;
     try {
       const whales = await Wallet.findAll({
-        where: {
-          isWhale: true,
-          dexActivityCount: { [Op.gte]: 5 },
-        },
         order: [["balance", "DESC"]],
         limit: 10,
       });
@@ -50,9 +51,13 @@ Available commands:
       whales.forEach((whale, index) => {
         message += `${index + 1}. Address: ${
           whale.address
-        }\n   Balance: ${whale.balance.toFixed(2)} SOL\n   DEX Activities: ${
-          whale.dexActivityCount
-        }\n\n`;
+        }\n   Balance: ${parseFloat(whale.balance).toFixed(
+          2
+        )} SOL\n   DEX Transactions: ${
+          whale.dexTransactionCount
+        }\n   Largest DEX Transaction: ${parseFloat(
+          whale.largestDEXTransaction
+        ).toFixed(2)} SOL\n\n`;
       });
 
       bot.sendMessage(chatId, message);
@@ -70,25 +75,24 @@ Available commands:
     const chatId = msg.chat.id;
     try {
       const totalWallets = await Wallet.count();
-      const whaleWallets = await Wallet.count({
-        where: { isWhale: true, dexActivityCount: { [Op.gte]: 5 } },
-      });
       const totalTransactions = await Transaction.count();
       const latestTransaction = await Transaction.findOne({
         order: [["timestamp", "DESC"]],
       });
 
       const message = `
-DEX Whale Wallet Statistics:
-Total Wallets Tracked: ${totalWallets}
-DEX Whale Wallets: ${whaleWallets}
-Total Transactions Processed: ${totalTransactions}
+DEX Whale Statistics:
+Total DEX Whale Wallets: ${totalWallets}
+Total DEX Whale Transactions: ${totalTransactions}
 Latest Transaction: ${
         latestTransaction
           ? new Date(latestTransaction.timestamp).toISOString()
           : "N/A"
       }
-    `;
+DEX Whale Balance Threshold: ${DEX_WHALE_BALANCE_THRESHOLD} SOL
+DEX Whale Transaction Threshold: ${DEX_WHALE_TRANSACTION_THRESHOLD} SOL
+Minimum Balance to Track: ${MIN_BALANCE_TO_TRACK} SOL
+      `;
 
       bot.sendMessage(chatId, message);
     } catch (error) {
@@ -102,30 +106,26 @@ Latest Transaction: ${
     const chatId = msg.chat.id;
     try {
       const recentTransactions = await Transaction.findAll({
-        include: [
-          {
-            model: Wallet,
-            as: "fromWallet",
-            where: { isWhale: true, dexActivityCount: { [Op.gte]: 5 } },
-          },
-        ],
         order: [["timestamp", "DESC"]],
         limit: 5,
       });
 
       let message = "Recent DEX Whale Activity:\n\n";
       for (const tx of recentTransactions) {
-        message += `Whale: ${tx.fromWallet.address}\n`;
-        message += `Amount: ${tx.amount.toFixed(2)} SOL\n`;
-        message += `Timestamp: ${new Date(tx.timestamp).toISOString()}\n\n`;
+        message += `Signature: ${tx.signature}\n`;
+        message += `From: ${tx.fromWallet}\n`;
+        message += `To: ${tx.toWallet}\n`;
+        message += `Amount: ${parseFloat(tx.amount).toFixed(2)} SOL\n`;
+        message += `Timestamp: ${new Date(tx.timestamp).toISOString()}\n`;
+        message += `Involved Whales: ${tx.involvedWhales}\n\n`;
       }
 
       bot.sendMessage(chatId, message);
     } catch (error) {
-      logger.error("Error fetching recent activity:", error);
+      logger.error("Error fetching recent DEX activity:", error);
       bot.sendMessage(
         chatId,
-        "Sorry, there was an error fetching recent activity."
+        "Sorry, there was an error fetching recent DEX activity."
       );
     }
   });
@@ -139,16 +139,18 @@ Latest Transaction: ${
 
       if (wallet) {
         const message = `
-Wallet Information:
+DEX Whale Wallet Information:
 Address: ${wallet.address}
-Balance: ${wallet.balance.toFixed(2)} SOL
-DEX Activities: ${wallet.dexActivityCount}
-Is Whale: ${wallet.isWhale ? "Yes" : "No"}
+Balance: ${parseFloat(wallet.balance).toFixed(2)} SOL
+DEX Transactions: ${wallet.dexTransactionCount}
+Largest DEX Transaction: ${parseFloat(wallet.largestDEXTransaction).toFixed(
+          2
+        )} SOL
 Last Activity: ${new Date(wallet.lastActivity).toISOString()}
-      `;
+        `;
         bot.sendMessage(chatId, message);
       } else {
-        bot.sendMessage(chatId, "Wallet not found or not tracked.");
+        bot.sendMessage(chatId, "Wallet not found or not a DEX whale.");
       }
     } catch (error) {
       logger.error("Error searching for wallet:", error);
@@ -157,6 +159,20 @@ Last Activity: ${new Date(wallet.lastActivity).toISOString()}
         "Sorry, there was an error searching for the wallet."
       );
     }
+  });
+
+  // Criteria command
+  bot.onText(/\/criteria/, (msg) => {
+    const chatId = msg.chat.id;
+    const message = `
+Current DEX Whale Criteria:
+1. Balance Threshold: ${DEX_WHALE_BALANCE_THRESHOLD} SOL or more
+2. Transaction Threshold: ${DEX_WHALE_TRANSACTION_THRESHOLD} SOL or more in a single DEX transaction
+3. Minimum Balance to Track: ${MIN_BALANCE_TO_TRACK} SOL
+
+A wallet is considered a DEX whale if it meets either the balance or transaction threshold and has at least the minimum balance to track.
+    `;
+    bot.sendMessage(chatId, message);
   });
 
   // Error handling
