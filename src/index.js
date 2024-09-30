@@ -1,7 +1,7 @@
 const express = require("express");
 const { sequelize } = require("./models");
 const { monitorTransactions } = require("./services/solanaMonitor");
-const telegramBot = require("./services/telegramBot");
+const { startBot } = require("./services/telegramBot");
 const routes = require("./routes");
 const errorHandler = require("./middlewares/errorHandler");
 
@@ -33,7 +33,7 @@ sequelize
       monitorTransactions().catch((err) => {
         logger.error("Error in monitoring transactions:", err);
       });
-      telegramBot.start();
+      startBot();
     });
   })
   .catch((err) => {
