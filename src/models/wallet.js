@@ -15,23 +15,13 @@ module.exports = (sequelize) => {
       type: DataTypes.DATE,
       allowNull: false,
     },
-    isWhale: {
-      type: DataTypes.BOOLEAN,
-      allowNull: false,
-      defaultValue: false,
-    },
-    activityCount: {
+    dexTransactionCount: {
       type: DataTypes.INTEGER,
       allowNull: false,
       defaultValue: 0,
     },
-    dailyTransactionVolume: {
+    largestDEXTransaction: {
       type: DataTypes.DECIMAL(20, 8),
-      allowNull: false,
-      defaultValue: 0,
-    },
-    dailyTransactionCount: {
-      type: DataTypes.INTEGER,
       allowNull: false,
       defaultValue: 0,
     },
