@@ -1,6 +1,7 @@
 const web3 = require("@solana/web3.js");
 const { Wallet, Transaction } = require("../models");
 const logger = require("../utils/logger");
+const { StakeProgram } = web3;
 
 // Configuration
 const DEX_WHALE_BALANCE_THRESHOLD = 10000; // in SOL
@@ -88,13 +89,34 @@ const STAKE_PROGRAM_ID = new web3.PublicKey(
 async function isStakingAccount(address) {
   try {
     const pubkey = new web3.PublicKey(address);
-    const accountInfo = await connection.getAccountInfo(pubkey);
 
-    if (!accountInfo) {
+    const stakeAccounts = await connection.getParsedProgramAccounts(
+      StakeProgram.programId,
+      {
+        filters: [
+          {
+            memcmp: {
+              offset: 12,
+              bytes: pubkey.toBase58(),
+            },
+          },
+        ],
+      }
+    );
+
+    if (stakeAccounts.length > 0) {
+      return true;
+    } else {
       return false;
     }
 
-    return accountInfo.owner.equals(STAKE_PROGRAM_ID);
+    // const accountInfo = await connection.getAccountInfo(pubkey);
+
+    // if (!accountInfo) {
+    //   return false;
+    // }
+
+    // return accountInfo.owner.equals(STAKE_PROGRAM_ID);
   } catch (error) {
     console.error(`Error checking if ${address} is a staking account:`, error);
     return false;
@@ -226,6 +248,7 @@ async function processTransaction(transaction) {
       } catch (error) {
         logger.error(`Error processing account ${address}: ${error.message}`);
       }
+      await sleep(2000);
     }
   }
 
@@ -320,7 +343,6 @@ async function monitorTransactions() {
                 );
                 logger.debug(`Transaction details: ${JSON.stringify(tx)}`);
               }
-              await sleep(2000);
             }
             break; // Success, move to next block
           } else {
@@ -353,7 +375,7 @@ async function monitorTransactions() {
       }
       // Wait 5 seconds between each block to avoid rate limiting
       if (i < BLOCKS_PER_SAMPLE - 1) {
-        await sleep(10000);
+        await sleep(5000);
       }
     }
 

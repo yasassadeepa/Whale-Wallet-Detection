@@ -4,8 +4,8 @@ const { Op } = require("sequelize");
 const logger = require("../utils/logger");
 
 // Configuration constants
-const DEX_WHALE_BALANCE_THRESHOLD = 1000; // in SOL
-const DEX_WHALE_TRANSACTION_THRESHOLD = 100; // in SOL
+const DEX_WHALE_BALANCE_THRESHOLD = 10000; // in SOL
+const DEX_WHALE_TRANSACTION_THRESHOLD = 1000; // in SOL
 const MIN_BALANCE_TO_TRACK = 10; // in SOL
 
 let bot;
@@ -169,6 +169,8 @@ Current DEX Whale Criteria:
 1. Balance Threshold: ${DEX_WHALE_BALANCE_THRESHOLD} SOL or more
 2. Transaction Threshold: ${DEX_WHALE_TRANSACTION_THRESHOLD} SOL or more in a single DEX transaction
 3. Minimum Balance to Track: ${MIN_BALANCE_TO_TRACK} SOL
+4. Include Only DEX Wallets
+5. Ignore Staking Wallets
 
 A wallet is considered a DEX whale if it meets either the balance or transaction threshold and has at least the minimum balance to track.
     `;
